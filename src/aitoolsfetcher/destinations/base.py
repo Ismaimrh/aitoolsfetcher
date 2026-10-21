@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any
 
-from aitoolsfetcher.core.models import AITool
+if TYPE_CHECKING:
+    from aitoolsfetcher.core.models import AITool
 
 
 class BaseDestination(ABC):
@@ -13,6 +15,10 @@ class BaseDestination(ABC):
     name: str = "base"
 
     @abstractmethod
-    async def deliver(self, tools: list[AITool], **kwargs) -> None:
-        """Deliver tools to this destination."""
-        ...
+    async def deliver(self, tools: list[AITool], **kwargs: Any) -> None:
+        """Deliver tools to this destination.
+
+        Args:
+            tools: Tools to deliver.
+            **kwargs: Destination-specific options.
+        """

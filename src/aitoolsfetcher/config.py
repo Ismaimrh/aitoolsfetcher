@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
+else:  # pragma: no cover - only on Python 3.10
+    import tomli as tomllib
 
 CONFIG_DIR = Path.home() / ".aitoolsfetcher"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
@@ -81,7 +82,7 @@ def _env_override(settings: Settings) -> Settings:
     return settings
 
 
-def load_settings(config_path: Optional[Path] = None) -> Settings:
+def load_settings(config_path: Path | None = None) -> Settings:
     """Load settings from config file, then override with env vars."""
     path = config_path or CONFIG_FILE
     settings = Settings()
@@ -98,7 +99,9 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         top_level = {k: v for k, v in data.items() if not isinstance(v, dict)}
 
         merged = {**top_level, **general, **api_keys}
-        sources_parsed = {k: SourceConfig(**v) for k, v in sources_raw.items() if isinstance(v, dict)}
+        sources_parsed = {
+            k: SourceConfig(**v) for k, v in sources_raw.items() if isinstance(v, dict)
+        }
         if sources_parsed:
             merged["sources"] = sources_parsed
         settings = Settings(**merged)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from aitoolsfetcher.core.models import AICategory, AITool, FetchResult, SearchFilters
 
 
@@ -25,15 +23,19 @@ class TestAITool:
 
     def test_source_code_or_source_fallback(self):
         tool = AITool(
-            name="Test", description="test",
-            source_platform="reddit", source_url="https://reddit.com/r/test",
+            name="Test",
+            description="test",
+            source_platform="reddit",
+            source_url="https://reddit.com/r/test",
         )
         assert tool.source_code_or_source == "https://reddit.com/r/test"
 
     def test_default_values(self):
         tool = AITool(
-            name="Min", description="Minimal tool",
-            source_platform="github", source_url="https://github.com/x/y",
+            name="Min",
+            description="Minimal tool",
+            source_platform="github",
+            source_url="https://github.com/x/y",
         )
         assert tool.category == AICategory.OTHER
         assert tool.stars is None

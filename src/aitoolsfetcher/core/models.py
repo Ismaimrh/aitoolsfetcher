@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -32,18 +32,18 @@ class AITool(BaseModel):
     category: AICategory = AICategory.OTHER
     source_platform: str
     source_url: str
-    source_code_url: Optional[str] = None
-    homepage_url: Optional[str] = None
-    stars: Optional[int] = None
-    language: Optional[str] = None
+    source_code_url: str | None = None
+    homepage_url: str | None = None
+    stars: int | None = None
+    language: str | None = None
     topics: list[str] = Field(default_factory=list)
-    license: Optional[str] = None
+    license: str | None = None
     author: str = ""
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
-    last_updated: Optional[datetime] = None
+    last_updated: datetime | None = None
     popularity_score: float = 0.0
     ai_relevance_score: float = 0.0
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -67,8 +67,8 @@ class SearchFilters(BaseModel):
     categories: list[AICategory] = Field(default_factory=list)
     min_stars: int = 0
     min_relevance: float = 0.5
-    since: Optional[datetime] = None
-    language: Optional[str] = None
+    since: datetime | None = None
+    language: str | None = None
     limit: int = 20
 
 
@@ -77,6 +77,9 @@ class FetchResult(BaseModel):
 
     tools: list[AITool] = Field(default_factory=list)
     new_count: int = 0
+    new_ids: list[str] = Field(
+        default_factory=list, description="IDs of tools in `tools` that were not cached before"
+    )
     cached_count: int = 0
     total_fetched: int = 0
     errors: dict[str, str] = Field(default_factory=dict)

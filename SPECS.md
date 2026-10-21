@@ -1,413 +1,241 @@
-# AIToolsFetcher — Technical Specifications
+# AIToolsFetcher — Design Notes
+
+This is the design document for AIToolsFetcher. It describes what is built today and what is
+planned. Each section is marked **Built**, **Planned** or **Not planned**. For install and usage,
+see the [README](README.md).
 
 ## 1. Overview
 
-**AIToolsFetcher** is an open-source Python package that aggregates, classifies, and delivers trending AI tools from multiple platforms. It helps developers stay current with the rapidly evolving AI tool ecosystem.
-
-```bash
-pip install aitoolsfetcher
-```
+AIToolsFetcher finds new and trending AI tools, classifies them, keeps them in a local SQLite
+cache and delivers what is new. It works with zero configuration and no API keys.
 
 ```python
 from aitoolsfetcher import AIToolsFetcher
 
-fetcher = AIToolsFetcher()
-tools = await fetcher.search("AI code generation agents")
+async with AIToolsFetcher() as fetcher:
+    result = await fetcher.search("AI code generation agents", limit=10)
 ```
 
 ```bash
-aitoolsfetcher search "vector database" --sources github,huggingface --format json
+aitoolsfetcher search "vector database" --format json
 ```
 
----
+The package is installed from source for now. Releasing it on PyPI is planned.
 
-## 2. Fetch Modes
+## 2. Fetch modes — Built
 
-### 2.1 On-Demand (User-Triggered)
-```python
-# Programmatic
-tools = await fetcher.search(query="AI agents", sources=["github", "reddit"])
+| Mode | CLI | Behaviour |
+|---|---|---|
+| On demand | `search QUERY`, `trending` | Runs once and prints or exports the results |
+| Periodic | `periodic QUERY --every 6h --dest ...` | Runs now, then on a fixed interval (`30m`, `6h`, `1d`) |
+| Scheduled | `schedule QUERY --cron "0 9 * * MON" --dest ...` | Runs on a 5-field cron expression in local time |
 
-# CLI
-aitoolsfetcher search "AI agents" --sources github,reddit
-```
-- Executes immediately, returns results
-- Supports filtering by source, category, date range, stars/popularity
-- Results are cached automatically
+Periodic and scheduled runs deliver only the tools that were not in the cache before that run.
+Cron weekday numbers follow standard crontab (0 and 7 are Sunday). In Python, the same jobs go
+through `aitoolsfetcher.core.scheduler.Scheduler` with a `FetchJob`.
 
-### 2.2 Scheduled (Cron-Like)
-```python
-fetcher.schedule(
-    query="new AI tools",
-    cron="0 9 * * MON",  # Every Monday at 9am
-    destination=FolderDestination("~/ai-tools-weekly/"),
-    # OR
-    destination=NotionDestination(database_id="xxx"),
-    # OR
-    destination=EmailDestination(to="dev@example.com"),
-)
-fetcher.run()  # Blocks and runs scheduler
-```
+## 3. Sources
 
-```bash
-aitoolsfetcher schedule "new AI tools" \
-  --cron "0 9 * * MON" \
-  --dest folder:~/ai-tools-weekly/
-```
-- User defines cron expression + destination
-- Runs as a background daemon or foreground process
-- Only delivers NEW tools (cache-aware dedup)
+### 3.1 Adapter interface — Built
 
-### 2.3 Periodic (Interval-Based)
-```python
-fetcher.periodic(
-    query="AI tools",
-    interval="6h",  # or timedelta(hours=6)
-    destination=JSONFileDestination("~/ai-tools.json"),
-)
-```
-
-```bash
-aitoolsfetcher periodic "AI tools" --every 6h --dest json:~/ai-tools.json
-```
-- Simpler than scheduled — just a fixed interval
-- Same destination and dedup behavior as scheduled
-
----
-
-## 3. Data Sources
-
-### 3.1 Source Adapter Interface
 ```python
 class BaseSource(ABC):
     name: str
     requires_auth: bool
 
-    @abstractmethod
-    async def search(self, query: str, **filters) -> list[AITool]: ...
-
-    @abstractmethod
-    async def trending(self, **filters) -> list[AITool]: ...
-
-    async def traceback_source_code(self, tool: AITool) -> Optional[str]:
-        """Attempt to find source code URL for tools discovered on non-code platforms."""
-        ...
+    async def search(self, filters: SearchFilters) -> list[AITool]: ...
+    async def trending(self, limit: int = 20) -> list[AITool]: ...
+    async def traceback_source_code(self, tool: AITool) -> str | None: ...
 ```
 
-### 3.2 Sources
+Each adapter handles its own errors and rate limiting. The engine queries sources concurrently,
+so a source that fails is reported in `FetchResult.errors` and never stops the others. Adapters
+never import each other.
 
-| Source | Method | Auth Required | Reliability |
-|---|---|---|---|
-| **GitHub** | REST API v3 + GraphQL | Optional (higher rate limits with token) | High |
-| **HuggingFace** | HF API | Optional | High |
-| **arXiv** | arXiv API (OAI-PMH) | No | High |
-| **Reddit** | Scraping (r/MachineLearning, r/artificial, r/LocalLLaMA, etc.) | No | Medium |
-| **Product Hunt** | Scraping | No | Medium |
-| **X / Twitter** | Scraping (nitter instances / search scraping) | No | Low (fragile) |
-| **LinkedIn** | Scraping (public posts) | No | Low (fragile) |
+### 3.2 Source status
 
-### 3.3 GitHub Adapter (Primary)
-- **Trending**: scrape github.com/trending + API search for recently created repos with AI topics
-- **Search**: GitHub Search API with qualifiers (`topic:ai`, `topic:llm`, `topic:agent`, etc.)
-- **Metadata**: stars, forks, language, last commit, description, topics, license
-- **Rate limiting**: respect API limits, exponential backoff, optional token for 5000 req/hr
+| Source | Access method | Status |
+|---|---|---|
+| GitHub search | Official REST search API | **Built** |
+| GitHub trending | Public github.com/trending page (GitHub has no trending API) | **Built**, under review: may move to API search for recently created repos |
+| HuggingFace | Official Hub API (trending models and Spaces) | Planned |
+| arXiv | Official API (recent cs.AI / cs.CL / cs.LG papers that link to code) | Planned |
+| Product Hunt | Official API only | Planned, only if its current terms allow this use |
+| Reddit | Official API only | Planned, only if its current terms allow this use |
+| X / Twitter | — | **Not planned**: no data is collected from X |
+| LinkedIn | — | **Not planned**: no data is collected from LinkedIn |
 
-### 3.4 Source Code Traceback
-For tools discovered on non-code platforms (X, LinkedIn, Reddit, Product Hunt):
-1. Extract URLs from post content
-2. Check if any URL points to GitHub/GitLab/HuggingFace
-3. If not, search GitHub for the tool name + keywords from description
-4. Return best match or `None`
+Rules for every source:
 
----
+- Prefer official APIs over scraping, and check the vendor's current terms before adding one.
+- Send a descriptive User-Agent: `aitoolsfetcher/<version> (+https://github.com/Ismaimrh/aitoolsfetcher)`.
+- Back off on HTTP 429 and on rate-limit 403s.
+- Keep only public project metadata, with the author shown only as the account or organisation
+  handle the platform displays.
 
-## 4. Data Model
+### 3.3 GitHub adapter — Built
+
+- **Search**: the REST search API with the user's query, plus a `topic:ai` filter when the query
+  contains no AI term. Results are sorted by stars and paginated with a fixed page size.
+- **Trending**: this week's github.com/trending page, filtered to AI repos by the classifier.
+- **Metadata**: name, description, topics, stars, language, licence, owner handle, homepage,
+  last push.
+- **Rate limiting**: waits as the `retry-after` or `x-ratelimit-reset` headers ask (falling back
+  to exponential backoff), with a capped wait and a capped number of retries. If nothing was
+  collected it raises `GitHubRateLimitError` with a clear message; otherwise it returns partial
+  results.
+- **Token**: optional (`GITHUB_TOKEN`). It raises GitHub's rate limit; no scopes are needed.
+
+### 3.4 Source-code traceback — Planned
+
+Tools found outside GitHub (HuggingFace, arXiv) should be linked to their code:
+
+1. Extract URLs from the page or paper.
+2. Keep links that point to GitHub, GitLab or HuggingFace.
+3. Otherwise, search GitHub for the tool name plus keywords from its description.
+4. Return the best match, or `None`.
+
+## 4. Data model — Built
 
 ```python
 class AITool(BaseModel):
-    """Core data model for a discovered AI tool."""
-    id: str                          # Content hash for dedup
     name: str
     description: str
-    category: AICategory             # Enum: AGENT, FRAMEWORK, MODEL, DATASET, INFRA, DEV_TOOL, OTHER
-    source_platform: str             # "github", "reddit", etc.
-    source_url: str                  # Original discovery URL
-    source_code_url: Optional[str]   # GitHub/GitLab URL (traced back if needed)
-    homepage_url: Optional[str]
-    stars: Optional[int]             # GitHub stars or equivalent metric
-    language: Optional[str]          # Primary programming language
-    topics: list[str]                # Tags/topics
-    license: Optional[str]
-    author: str
+    category: AICategory
+    source_platform: str             # "github", ...
+    source_url: str                  # where the tool was found
+    source_code_url: str | None      # code repository, if known
+    homepage_url: str | None
+    stars: int | None
+    language: str | None
+    topics: list[str]
+    license: str | None
+    author: str                      # account or organisation handle only
     discovered_at: datetime
-    last_updated: Optional[datetime]
-    popularity_score: float          # Normalized 0-1 score across platforms
-    ai_relevance_score: float        # Classification confidence 0-1
-    metadata: dict                   # Platform-specific extra data
+    last_updated: datetime | None
+    popularity_score: float
+    ai_relevance_score: float        # 0-1
+    metadata: dict[str, Any]
+
+    id: str                          # computed: hash of (name, source_platform, author)
 
 class AICategory(str, Enum):
-    AGENT = "agent"
-    FRAMEWORK = "framework"
-    MODEL = "model"
-    DATASET = "dataset"
-    INFRA = "infra"
-    DEV_TOOL = "dev_tool"
-    LIBRARY = "library"
-    CLI_TOOL = "cli_tool"
-    OTHER = "other"
+    AGENT, FRAMEWORK, MODEL, DATASET, INFRA, DEV_TOOL, LIBRARY, CLI_TOOL, OTHER
 ```
 
----
+`FetchResult` carries the tools, `new_ids` (the tools not seen in the cache before), counts and
+per-source errors.
 
-## 5. Classification Pipeline
+## 5. Classification
 
-### 5.1 Keyword Classifier (Default)
-```python
-class KeywordClassifier(BaseClassifier):
-    """Fast, zero-dependency classifier using curated keyword lists."""
+### 5.1 Keyword classifier (default) — Built
+
+Offline and free. A weighted keyword taxonomy is matched on whole words in the name, description
+and topics, with a few penalty words. It returns an AI-relevance score (0-1) and the best-matching
+category. Its accuracy has not been measured yet; a labelled evaluation set is planned.
+
+### 5.2 LLM classifier (optional) — Built
+
+Used only when an LLM API key is configured (`AITF_LLM_KEY` or `llm_api_key`). It sends each
+tool's name, description and topics to the model and gets back `is_ai_tool`, `category`,
+`confidence` and a one-line summary. When the model says a tool is *not* AI, its relevance
+becomes `1 - confidence` and its category `other`.
+
+- Providers today: Anthropic and OpenAI, which bill per call.
+- If the provider's SDK isn't installed, the engine falls back to the keyword classifier with a
+  warning.
+- **Planned**: free providers through an OpenAI-compatible `base_url` (Groq free tier, local
+  Ollama), model names in config, and batching to cut the number of calls.
+
+### 5.3 Pipeline
+
 ```
-- Curated taxonomy of AI-related keywords organized by category
-- TF-IDF-like scoring on repo name + description + README (first 500 chars) + topics
-- Thresholds tuned to minimize false positives (precision > recall)
-- Returns `ai_relevance_score` (0-1) and best-match `AICategory`
-
-**Keyword domains:**
-- Frameworks: pytorch, tensorflow, jax, langchain, llamaindex, autogen, crewai...
-- Models: llm, transformer, diffusion, gpt, claude, llama, mistral, embedding...
-- Agents: agent, autonomous, tool-use, function-calling, mcp, a2a...
-- Infra: vector-db, rag, fine-tuning, deployment, inference, serving, quantization...
-- Dev tools: prompt engineering, evaluation, testing, monitoring, observability...
-
-### 5.2 LLM Classifier (Optional Enhancement)
-```python
-class LLMClassifier(BaseClassifier):
-    """High-accuracy classifier using Claude/OpenAI API."""
-
-    def __init__(self, api_key: str, provider: str = "anthropic"): ...
-```
-- Activated only when user provides an LLM API key
-- Sends tool name + description + README excerpt to LLM
-- LLM returns: `is_ai_tool` (bool), `category`, `confidence`, `one_line_summary`
-- Cached per tool (never re-classifies the same content)
-- Supports Anthropic (Claude) and OpenAI as providers
-- Batch classification to minimize API calls
-
-### 5.3 Pipeline Flow
-```
-Raw results → Keyword filter (fast reject non-AI) → LLM classify (if available) → Final scored results
+Raw results → classify (keyword, or LLM if configured) → filter by relevance → cache → output
 ```
 
----
+## 6. Cache — Built
 
-## 6. Cache Layer
+`ToolCache` in `core/cache.py`, stored at `~/.aitoolsfetcher/cache.db`:
 
-### 6.1 SQLite Cache
-```python
-class ToolCache:
-    """Local SQLite cache for deduplication and history."""
+- `has`, `store`, `get_new`, `search`, `history`, `prune`, `count`, `clear`
+- Dedup key: the tool's `id`. A tool whose `source_code_url` is already cached is not added a
+  second time.
+- Entries older than `cache_ttl_days` (default 90) are removed when the engine opens the cache.
+- Full-text search on name and description with SQLite FTS5.
+- **Planned**: merge metadata when the same code repository is found on several platforms.
 
-    async def has(self, tool_id: str) -> bool: ...
-    async def store(self, tools: list[AITool]) -> int: ...  # returns new count
-    async def get_new(self, tools: list[AITool]) -> list[AITool]: ...
-    async def search(self, query: str) -> list[AITool]: ...
-    async def history(self, since: datetime) -> list[AITool]: ...
-    async def clear(self) -> None: ...
-```
+## 7. Destinations and formats
 
-- Stored at `~/.aitoolsfetcher/cache.db`
-- Dedup key: content hash of `(name, source_platform, author)` — same tool on different platforms gets separate entries but linked via `source_code_url`
-- Cross-platform dedup: if same `source_code_url` exists, merge metadata instead of creating duplicate
-- TTL-based expiry: entries older than 90 days auto-pruned (configurable)
-- Full-text search on name + description via SQLite FTS5
+### 7.1 Interface — Built
 
----
-
-## 7. Destination Adapters
-
-### 7.1 Interface
 ```python
 class BaseDestination(ABC):
-    @abstractmethod
-    async def deliver(self, tools: list[AITool], format: str = "json") -> None: ...
+    name: str
+
+    async def deliver(self, tools: list[AITool], **kwargs: Any) -> None: ...
 ```
 
-### 7.2 Destinations (v1)
+### 7.2 Destinations
 
-| Destination | Description | Config |
+| Destination | CLI | Status |
 |---|---|---|
-| **Folder** | Save results as files to a local directory | `path` |
-| **JSON File** | Append/write results to a JSON file | `path`, `mode` (append/overwrite) |
-| **Console** | Rich table in terminal (default for CLI) | - |
-| **Notion** | Add entries to a Notion database | `api_key`, `database_id` |
-| **Email** | Send digest email | `smtp_config`, `recipients` |
-| **Social (X)** | Post curated tools to X feed | `api_keys` |
+| Console | default | **Built**: table, or one panel per tool with `--detail` |
+| Folder | `folder:PATH` | **Built**: one timestamped file per run, in json, csv or md |
+| JSON file | `json:FILE` | **Built**: appends without duplicates; refuses to overwrite a corrupt file |
+| Notion | — | Planned |
+| Email (SMTP) | — | Planned |
+| Posting to X or LinkedIn | — | **Not planned** |
 
-### 7.3 Output Formats
-- **JSON**: Full `AITool` model serialized
-- **CSV**: Flat export for spreadsheets
-- **Markdown**: Formatted list with links (great for Notion/GitHub)
-- **CLI Table**: `rich` table with columns: Name | Category | Description (truncated) | Source Link
+### 7.3 Output formats — Built
 
----
+`json` (full model), `csv` (flat, for spreadsheets) and `md` (Markdown list with links), from
+`aitoolsfetcher.formatters`. They are available on `search`, `trending` and `export`, and in the
+folder destination.
 
-## 8. CLI Interface
+## 8. CLI — Built
 
 ```
-aitoolsfetcher [COMMAND] [OPTIONS]
+aitoolsfetcher [--verbose] COMMAND [OPTIONS]
 
-Commands:
-  search      On-demand search for AI tools
-  trending    Fetch currently trending AI tools
-  schedule    Set up scheduled fetching with destination
-  periodic    Set up interval-based fetching
-  history     View previously fetched tools from cache
-  config      Manage configuration (API keys, defaults)
-  sources     List available sources and their status
-  export      Export cache to file (json/csv/md)
-
-Global Options:
-  --sources       Comma-separated source list (default: all enabled)
-  --format        Output format: json, csv, md, table (default: table)
-  --limit         Max results per source (default: 20)
-  --min-score     Minimum AI relevance score 0-1 (default: 0.5)
-  --category      Filter by category
-  --since         Only tools discovered after this date
-  --dest          Destination adapter (folder:/path, json:/path, notion:db_id, email:addr)
-  --verbose       Show detailed output
-  --no-cache      Skip cache, fetch fresh
+  search QUERY   [--sources] [--limit] [--min-stars] [--min-score] [--format] [--dest] [--detail]
+  trending       [--sources] [--limit] [--format] [--dest] [--detail]
+  history        [--limit] [--detail]
+  export         --output FILE [--format json|csv|md] [--limit]
+  periodic QUERY --every INTERVAL --dest DEST [--sources] [--limit]
+  schedule QUERY --cron EXPR --dest DEST [--sources] [--limit]
+  sources        list sources and whether they are available
 ```
 
-### CLI Table Output Example
-```
-┌─────────────────────┬───────────┬──────────────────────────────────────┬────────────────────────────────────┐
-│ Name                │ Category  │ What it does                         │ Source                             │
-├─────────────────────┼───────────┼──────────────────────────────────────┼────────────────────────────────────┤
-│ AutoAgent           │ Agent     │ Build autonomous AI agents with MCP  │ github.com/auto/autoagent          │
-│ VectorForge         │ Infra     │ High-perf vector DB for RAG pipes    │ github.com/vf/vectorforge          │
-│ PromptBench         │ Dev Tool  │ Evaluate and compare LLM prompts     │ huggingface.co/spaces/promptbench  │
-│ NeuralDeploy        │ Infra     │ One-click LLM deployment to cloud    │ producthunt.com/posts/neuraldeploy │
-└─────────────────────┴───────────┴──────────────────────────────────────┴────────────────────────────────────┘
+`--format` takes `table`, `json`, `csv` or `md`. `--dest` takes `folder:PATH` or `json:FILE`.
+See the README for real example output.
 
-4 new AI tools found (12 total fetched, 8 cached)
-```
+## 9. Configuration — Built
 
----
+Optional file at `~/.aitoolsfetcher/config.toml`; see [`config.example.toml`](config.example.toml).
+Environment variables take precedence: `GITHUB_TOKEN` (or `AITF_GITHUB_TOKEN`), `AITF_LLM_KEY`,
+`AITF_LLM_PROVIDER`. Keys never go in the repository.
 
-## 9. Configuration
+## 10. Dependencies
 
-Stored at `~/.aitoolsfetcher/config.toml`:
+Core: `httpx`, `pydantic`, `click`, `rich`, `apscheduler`, `aiosqlite`, `beautifulsoup4`, and
+`tomli` on Python 3.10.
 
-```toml
-[general]
-default_sources = ["github", "huggingface", "reddit", "arxiv", "producthunt"]
-default_format = "table"
-cache_ttl_days = 90
-min_relevance_score = 0.5
-max_results_per_source = 20
+Optional extras: `llm` (Anthropic and OpenAI SDKs) is used today. `notion` and `email` are
+reserved for the planned destinations.
 
-[api_keys]
-github_token = ""          # Optional, increases rate limits
-huggingface_token = ""     # Optional
-notion_api_key = ""        # Required for Notion destination
-llm_api_key = ""           # Optional, enables LLM classifier
-llm_provider = "anthropic" # "anthropic" or "openai"
+## 11. Error handling — Built
 
-[sources.twitter]
-enabled = false            # Fragile, disabled by default
-# nitter_instance = ""
+- Each source catches its own errors; partial results are always returned.
+- Rate-limit detection with backoff, as described in 3.3.
+- Configurable request timeout (`request_timeout`).
+- Logging via the standard library; `--verbose` turns on debug output.
 
-[sources.linkedin]
-enabled = false            # Fragile, disabled by default
+## 12. Data, privacy and terms
 
-[destinations.email]
-smtp_host = ""
-smtp_port = 587
-smtp_user = ""
-smtp_password = ""
-from_address = ""
-```
-
----
-
-## 10. Dependency Strategy
-
-### Core (always installed)
-- `httpx` — async HTTP client
-- `pydantic` — data validation/models
-- `click` — CLI framework
-- `rich` — terminal formatting
-- `apscheduler` — scheduling
-- `aiosqlite` — async SQLite
-- `beautifulsoup4` — HTML parsing for scrapers
-- `tomli` / `tomllib` — config parsing
-
-### Optional (extras)
-```bash
-pip install aitoolsfetcher[notion]    # notion-client
-pip install aitoolsfetcher[email]     # aiosmtplib
-pip install aitoolsfetcher[llm]       # anthropic, openai
-pip install aitoolsfetcher[all]       # everything
-```
-
----
-
-## 11. Implementation Phases
-
-### Phase 1 — Core + GitHub (MVP)
-- [ ] Project scaffolding (pyproject.toml, src layout, CI)
-- [ ] Data models (`AITool`, `AICategory`)
-- [ ] Cache layer (SQLite + FTS5)
-- [ ] GitHub source adapter (API search + trending)
-- [ ] Keyword classifier
-- [ ] CLI: `search`, `trending`, `history` commands
-- [ ] Console table output
-- [ ] JSON file destination
-- [ ] Folder destination
-- [ ] Configuration management
-
-### Phase 2 — More Sources + Classification
-- [ ] Reddit adapter (scraping)
-- [ ] HuggingFace adapter (API)
-- [ ] arXiv adapter (API)
-- [ ] Product Hunt adapter (scraping)
-- [ ] LLM classifier (Anthropic + OpenAI)
-- [ ] Source code traceback for non-GitHub tools
-- [ ] CSV + Markdown output formats
-
-### Phase 3 — Scheduling + Destinations
-- [ ] Scheduled fetching (cron)
-- [ ] Periodic fetching (interval)
-- [ ] Notion destination
-- [ ] Email destination
-- [ ] CLI: `schedule`, `periodic`, `export` commands
-- [ ] Cross-platform dedup (merge same tool from different sources)
-
-### Phase 4 — Social + Polish
-- [ ] X/Twitter adapter (best-effort scraping)
-- [ ] LinkedIn adapter (best-effort scraping)
-- [ ] Social posting destination (X)
-- [ ] README, docs, examples
-- [ ] PyPI publishing
-- [ ] GitHub Actions CI/CD
-
----
-
-## 12. Error Handling & Resilience
-
-- Each source adapter catches its own exceptions — one failing source never crashes the pipeline
-- Rate limit detection with automatic backoff (exponential + jitter)
-- Scraping adapters detect blocking/CAPTCHAs and gracefully degrade
-- All network operations have configurable timeouts (default: 30s)
-- Partial results are always returned — if 3/5 sources succeed, return those 3
-- Structured logging via `logging` stdlib (no heavy deps)
-
----
-
-## 13. Security & Legal
-
-- No API keys in code or defaults — always user-provided via config or env vars
-- Scraping adapters respect `robots.txt` where applicable
-- Rate limiting is conservative by default to avoid IP bans
-- X and LinkedIn adapters disabled by default with clear documentation about ToS risks
-- All scraped data is publicly available information only
-- MIT License for the package itself
+- Only public project metadata is read. Authors appear only as the account or organisation
+  handle the platform shows.
+- Everything is stored locally in the user's cache, and nowhere else.
+- Nothing is collected from X/Twitter or LinkedIn.
+- Every source follows its platform's current terms and rate limits, as listed in 3.2.
+- No API keys in code or defaults. They come from env vars or the user's config file.
+- MIT licence.

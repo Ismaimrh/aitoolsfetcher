@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import tempfile
 from datetime import datetime
 
 import pytest
 
+from aitoolsfetcher import config as config_module
+from aitoolsfetcher.core import cache as cache_module
 from aitoolsfetcher.core.cache import ToolCache
 from aitoolsfetcher.core.models import AICategory, AITool
 
@@ -78,6 +79,34 @@ def sample_tools() -> list[AITool]:
             ai_relevance_score=0.1,
         ),
     ]
+
+
+_SECRET_ENV_VARS = (
+    "GITHUB_TOKEN",
+    "AITF_GITHUB_TOKEN",
+    "HF_TOKEN",
+    "AITF_HF_TOKEN",
+    "AITF_NOTION_KEY",
+    "AITF_LLM_KEY",
+    "AITF_LLM_PROVIDER",
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_dir(tmp_path, monkeypatch):
+    """Point config and cache at a temp folder and clear token env vars.
+
+    No test can read the developer's real ~/.aitoolsfetcher/config.toml or
+    cache, or pick up a real API key from the environment.
+    """
+    home = tmp_path / "aitf-home"
+    monkeypatch.setattr(config_module, "CONFIG_DIR", home)
+    monkeypatch.setattr(config_module, "CONFIG_FILE", home / "config.toml")
+    monkeypatch.setattr(config_module, "CACHE_DB", home / "cache.db")
+    monkeypatch.setattr(cache_module, "CACHE_DB", home / "cache.db")
+    for var in _SECRET_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    return home
 
 
 @pytest.fixture

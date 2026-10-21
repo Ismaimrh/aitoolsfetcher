@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
-from aitoolsfetcher.config import CACHE_DB, ensure_config_dir
+from aitoolsfetcher.config import CACHE_DB
 from aitoolsfetcher.core.models import AITool
 
 _SCHEMA = """
@@ -64,7 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_tools_source_code ON tools(source_code_url);
 """
 
 
-def _tool_to_row(tool: AITool) -> dict:
+def _tool_to_row(tool: AITool) -> dict[str, Any]:
     """Convert an AITool to a database row dict."""
     return {
         "id": tool.id,
@@ -103,13 +105,19 @@ def _row_to_tool(row: aiosqlite.Row) -> AITool:
 class ToolCache:
     """Async SQLite cache for tool deduplication and history."""
 
-    def __init__(self, db_path: Optional[str] = None):
+    def __init__(self, db_path: str | None = None) -> None:
+        """Create a cache handle. Call ``open()`` or use ``async with`` before use.
+
+        Args:
+            db_path: SQLite file path. Defaults to ``~/.aitoolsfetcher/cache.db``.
+        """
         self._db_path = db_path or str(CACHE_DB)
-        self._db: Optional[aiosqlite.Connection] = None
+        self._db: aiosqlite.Connection | None = None
 
     async def open(self) -> None:
-        """Initialize database connection and schema."""
-        ensure_config_dir()
+        """Open the database, creating its folder and schema if needed."""
+        if self._db_path != ":memory:":
+            Path(self._db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(self._db_path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
@@ -122,10 +130,12 @@ class ToolCache:
             self._db = None
 
     async def __aenter__(self) -> ToolCache:
+        """Open the cache on context entry."""
         await self.open()
         return self
 
-    async def __aexit__(self, *exc) -> None:
+    async def __aexit__(self, *exc: object) -> None:
+        """Close the cache on context exit."""
         await self.close()
 
     def _ensure_open(self) -> aiosqlite.Connection:
@@ -139,7 +149,7 @@ class ToolCache:
         async with db.execute("SELECT 1 FROM tools WHERE id = ?", (tool_id,)) as cursor:
             return await cursor.fetchone() is not None
 
-    async def has_source_code(self, source_code_url: str) -> Optional[str]:
+    async def has_source_code(self, source_code_url: str) -> str | None:
         """Check if a tool with the same source code URL exists. Returns existing tool ID."""
         if not source_code_url:
             return None
@@ -148,7 +158,7 @@ class ToolCache:
             "SELECT id FROM tools WHERE source_code_url = ? LIMIT 1", (source_code_url,)
         ) as cursor:
             row = await cursor.fetchone()
-            return row["id"] if row else None
+            return str(row["id"]) if row else None
 
     async def store(self, tools: list[AITool]) -> int:
         """Store tools in cache. Returns count of newly inserted tools."""
@@ -157,7 +167,9 @@ class ToolCache:
         for tool in tools:
             row = _tool_to_row(tool)
             # Check for cross-platform duplicate via source_code_url
-            existing = await self.has_source_code(tool.source_code_url) if tool.source_code_url else None
+            existing = (
+                await self.has_source_code(tool.source_code_url) if tool.source_code_url else None
+            )
             if existing and existing != tool.id:
                 # Merge: update metadata of existing entry if new one has more stars
                 await db.execute(
@@ -171,8 +183,14 @@ class ToolCache:
                 await db.execute(
                     """UPDATE tools SET stars = ?, popularity_score = ?, ai_relevance_score = ?,
                        last_updated = ?, metadata = ? WHERE id = ?""",
-                    (tool.stars, tool.popularity_score, tool.ai_relevance_score,
-                     row["last_updated"], row["metadata"], tool.id),
+                    (
+                        tool.stars,
+                        tool.popularity_score,
+                        tool.ai_relevance_score,
+                        row["last_updated"],
+                        row["metadata"],
+                        tool.id,
+                    ),
                 )
             else:
                 columns = ", ".join(row.keys())
@@ -187,7 +205,7 @@ class ToolCache:
 
     async def get_new(self, tools: list[AITool]) -> list[AITool]:
         """Filter list to only tools not already in cache."""
-        result = []
+        result: list[AITool] = []
         for tool in tools:
             if not await self.has(tool.id):
                 # Also check cross-platform duplicate
@@ -197,26 +215,40 @@ class ToolCache:
         return result
 
     async def search(self, query: str, limit: int = 50) -> list[AITool]:
-        """Full-text search across cached tools."""
+        """Full-text search across cached tool names, descriptions and topics.
+
+        The query is split into words and each word is quoted, so punctuation
+        such as ``-`` or ``:`` is matched literally instead of being read as
+        FTS5 syntax.
+
+        Args:
+            query: Free-text query.
+            limit: Maximum number of results.
+
+        Returns:
+            Matching tools, best match first.
+        """
+        words = re.findall(r"\w+", query)
+        if not words:
+            return []
+        fts_query = " ".join(f'"{w}"' for w in words)
         db = self._ensure_open()
         async with db.execute(
             """SELECT tools.* FROM tools_fts
                JOIN tools ON tools.rowid = tools_fts.rowid
                WHERE tools_fts MATCH ?
                ORDER BY rank LIMIT ?""",
-            (query, limit),
+            (fts_query, limit),
         ) as cursor:
             rows = await cursor.fetchall()
         return [_row_to_tool(row) for row in rows]
 
-    async def history(
-        self, since: Optional[datetime] = None, limit: int = 100
-    ) -> list[AITool]:
+    async def history(self, since: datetime | None = None, limit: int = 100) -> list[AITool]:
         """Retrieve tools from cache history."""
         db = self._ensure_open()
         if since:
             sql = "SELECT * FROM tools WHERE discovered_at >= ? ORDER BY discovered_at DESC LIMIT ?"
-            params: tuple = (since.isoformat(), limit)
+            params: tuple[Any, ...] = (since.isoformat(), limit)
         else:
             sql = "SELECT * FROM tools ORDER BY discovered_at DESC LIMIT ?"
             params = (limit,)
@@ -225,9 +257,19 @@ class ToolCache:
         return [_row_to_tool(row) for row in rows]
 
     async def prune(self, ttl_days: int = 90) -> int:
-        """Remove entries older than TTL. Returns count removed."""
+        """Remove entries first cached more than ``ttl_days`` ago.
+
+        Args:
+            ttl_days: Age limit in days.
+
+        Returns:
+            Number of entries removed.
+        """
         db = self._ensure_open()
-        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=ttl_days)).isoformat()
+        # created_at is written by SQLite's datetime('now'): "YYYY-MM-DD HH:MM:SS" in UTC
+        cutoff = (datetime.now(tz=timezone.utc) - timedelta(days=ttl_days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         cursor = await db.execute("DELETE FROM tools WHERE created_at < ?", (cutoff,))
         await db.commit()
         return cursor.rowcount
@@ -237,10 +279,11 @@ class ToolCache:
         db = self._ensure_open()
         async with db.execute("SELECT COUNT(*) FROM tools") as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else 0
+            return int(row[0]) if row else 0
 
     async def clear(self) -> None:
         """Remove all entries from cache."""
         db = self._ensure_open()
-        await db.executescript("DELETE FROM tools; DELETE FROM tools_fts;")
+        # The delete trigger keeps the FTS index in sync row by row
+        await db.execute("DELETE FROM tools")
         await db.commit()

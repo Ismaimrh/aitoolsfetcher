@@ -1,0 +1,25 @@
+# AIToolsFetcher example configuration
+#
+# Copy to ~/.aitoolsfetcher/config.toml and edit. Every setting is optional:
+# with no config file at all, `aitoolsfetcher search "AI agents"` works.
+#
+# Never commit your real config.toml. Environment variables override this file:
+#   GITHUB_TOKEN (or AITF_GITHUB_TOKEN), AITF_LLM_KEY, AITF_LLM_PROVIDER
+
+[general]
+cache_ttl_days = 90           # cached tools older than this are removed on start-up
+max_results_per_source = 20
+
+[api_keys]
+# Optional. A GitHub token (no scopes needed) gives a higher search API rate
+# limit. Create one at https://github.com/settings/tokens
+github_token = ""
+
+# Optional. Leave empty to use the free, offline keyword classifier.
+# Setting a key switches classification to an LLM; every search then makes
+# one API call per result, billed by the provider.
+llm_api_key = ""
+llm_provider = "anthropic"    # "anthropic" or "openai"
+
+[sources.github]
+enabled = true

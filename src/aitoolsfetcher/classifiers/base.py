@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-from aitoolsfetcher.core.models import AICategory, AITool
+if TYPE_CHECKING:
+    from aitoolsfetcher.core.models import AICategory, AITool
 
 
 class ClassificationResult(NamedTuple):
